@@ -192,6 +192,14 @@ def request(query, params):
     params['url'] = f'https://{domain}/search?{urlencode(url_params)}'
     params['domain'] = domain
 
+    # Yahoo geo-redirects search.yahoo.com to a country subdomain (e.g.
+    # au.search.yahoo.com) for regions absent from region2domain. The processor
+    # defaults to allow_redirects=False, so without this the engine parses the
+    # empty 302 body and silently returns zero results.
+    params['allow_redirects'] = True
+    # the geo-redirect is expected, so don't count it as an engine error
+    params['soft_max_redirects'] = 1
+
 
 def parse_url(url_string):
     """remove yahoo-specific tracking-url"""
@@ -221,7 +229,11 @@ def response(resp):
     url_xpath = './/div[contains(@class,"compTitle")]/h3/a/@href'
     title_xpath = './/h3//a/@aria-label'
 
-    domain = resp.search_params['domain']
+    # Use the domain that actually served the response, not the requested one:
+    # Yahoo geo-redirects search.yahoo.com to a country domain (e.g.
+    # au.search.yahoo.com), and the two serve different markup. Selecting the
+    # xpath from the requested domain matches nothing after such a redirect.
+    domain = resp.url.host or resp.search_params['domain']
     if domain == "search.yahoo.com":
         url_xpath = './/div[contains(@class,"compTitle")]/a/@href'
         title_xpath = './/div[contains(@class,"compTitle")]/a/h3/span'
