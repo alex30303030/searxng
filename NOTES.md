@@ -142,7 +142,7 @@ than the premise the fork was built on:
 | --- | --- | --- | --- |
 | brave | 0 — *too many requests* | **20 results** | **fixed by impersonation** |
 | yahoo | 0 — *HTTP protocol error* | **7 results** | **fixed by the engine patch below** |
-| duckduckgo | 0 — *CAPTCHA* | 0 — *CAPTCHA* | not fixed, see below |
+| duckduckgo | 0 — *CAPTCHA* | **10 results** | **fixed by the engine patch below** |
 | startpage | 0 — *CAPTCHA* | 0 — *JSONDecodeError* | blocked by Anubis PoW, see below |
 | google | 10 results | 10 results | no regression |
 | bing | 10 results | 10 results | no regression |
@@ -166,9 +166,13 @@ Reading this correctly matters:
   "because it got shutdown". It is absent from this fork, and no transport
   change can bring it back.
 
-So of the five engines this fork set out to fix: **1 fixed (brave), 1 untouched
-(duckduckgo), 2 partially advanced but still broken for other reasons (startpage,
-yahoo), 1 impossible (presearch, service dead).** Nothing regressed.
+So of the five engines this fork set out to fix: **3 fixed (brave, yahoo,
+duckduckgo), 1 blocked by a proof-of-work gate (startpage), 1 impossible
+(presearch, service dead).** Nothing regressed.
+
+Only brave was fixed by the TLS impersonation itself. Yahoo and DuckDuckGo were
+ordinary engine bugs that the impersonation work merely uncovered — worth
+remembering before reaching for a fingerprint explanation next time.
 
 ### Yahoo — fixed, two upstream bugs
 
@@ -210,38 +214,80 @@ Passing it requires computing the proof-of-work — deliberately defeating an
 anti-bot control the operator chose to deploy, not a parser fix. That is a
 policy decision, not an engineering one, and is left unimplemented here.
 
-### DuckDuckGo — still blocked; the likely reason
+### DuckDuckGo — fixed, and it was never about the fingerprint
 
-Impersonation does not help DDG, on any profile tried (`chrome`, `chrome136`,
-`firefox147`, `safari184`).
+Impersonation does not help DDG on any profile (`chrome`, `chrome136`,
+`firefox147`, `safari184`), and the CAPTCHA reproduced from several freshly
+allocated residential IPs with impersonation both on and off. Two independent
+triggers, each isolated on separate clean IPs:
 
-The likely cause is that **this patch fixes the TLS and HTTP/2 fingerprint but
-not the HTTP headers**. `default_headers=True` only lets curl_cffi fill in
-headers httpx has not already set, and httpx always sets its own:
+**1. POST is refused, GET is not.**
 
-| header | httpx sends | a real Chrome sends |
-| --- | --- | --- |
-| `accept` | `*/*` | `text/html,application/xhtml+xml,...` |
-| `accept-encoding` | `gzip, deflate` | `gzip, deflate, br, zstd` |
-| `connection` | `keep-alive` | *not sent — illegal in HTTP/2* |
+| request | result |
+| --- | --- |
+| `GET html.duckduckgo.com/html/?q=…` | 200, 10 results (4/4) |
+| `POST html.duckduckgo.com/html/` | 202, CAPTCHA (4/4) |
 
-So the handshake claims Chrome while the headers remain httpx-shaped, and
-`connection: keep-alive` on an HTTP/2 request is a protocol violation no
-browser commits. That is consistent with Brave (which appears to gate on TLS)
-being fixed while DDG (which is header-aware) is not.
+The same holds for `lite.duckduckgo.com`. The form fields move into the query
+string. `params["data"]` stays populated because `response()` reads the region
+from it, and the processor only forwards it for POST.
 
-This was **not** fixed here, for two reasons. Two of the DDG sub-engines set
-`Accept: */*` deliberately for XHR-style endpoints, so a blanket header rewrite
-risks breaking them; and the IP used for testing had been rate-limited by the
-testing itself, making any change unverifiable. Retry from an IP with a clean
-reputation before attempting it.
+**2. `Referer` must not point at the result URL.** Isolating the engine's
+headers one at a time over GET:
 
-A related experiment **was tried and reverted**: dropping SearXNG's User-Agent
-so curl_cffi's profile-matched one is used. It appeared to fix DDG, but that
-rested on a single sample — re-running later showed *every* combination,
-including the supposedly broken one, returning results. Meanwhile it regressed
-Google from 10 results to 0. Do not re-attempt it without repeated-sample
-measurements.
+| variant | result |
+| --- | --- |
+| bare GET | 200, 10 results |
+| **+ `Referer: …/html/`** | **202, CAPTCHA** ← sole trigger |
+| + firefox User-Agent | 200, 10 results |
+| + `Sec-Fetch-*` | 200, 10 results |
+
+Confirmed 3/3 each way. The full header set returns results with no Referer or
+with the DDG home page as Referer, and CAPTCHAs with the result URL. A GET
+navigation refering to itself is not something a browser does.
+
+Results are additionally unwrapped from DDG's `//duckduckgo.com/l/?uddg=`
+click redirect, which the html endpoint returns for every hit.
+
+An experiment **was tried and reverted**: dropping SearXNG's User-Agent so
+curl_cffi's profile-matched one is used. It appeared to fix DDG, but rested on
+a single sample — repeated sampling on clean IPs later showed *both* the
+matched and mismatched User-Agent CAPTCHAing identically, and meanwhile it
+regressed Google from 10 results to 0. Do not re-attempt without
+repeated-sample measurement.
+
+Worth knowing regardless: impersonation fixes the TLS/HTTP2 fingerprint but
+**not** the HTTP headers. `default_headers=True` only fills gaps, and httpx
+always sets `accept: */*`, `accept-encoding: gzip, deflate` and
+`connection: keep-alive` first — the last of which is illegal in HTTP/2. The
+headers still do not look like a browser's. It did not matter for these
+engines, but it is the next thing to look at if another engine starts
+blocking.
+
+### Proxy support — verified live
+
+A third instance was run with an HTTP residential proxy configured the normal
+way, to confirm the curl_cffi transport honours it:
+
+```yaml
+outgoing:
+  impersonate: chrome
+  proxies:
+    all://: "http://user:pass@host:port"
+```
+
+It returned the same results as the direct instance for every engine
+(duckduckgo 10, brave 20, yahoo 7, google 10, bing 10) at 2–5s instead of
+0.2–2.6s, i.e. the traffic really did traverse the proxy.
+
+**Use sticky sessions, not per-request rotation.** A rotating proxy assigns a
+different exit IP to every request, which breaks any engine that needs two
+requests from the same address — DuckDuckGo's `vqd` and Startpage's `sc` token
+are both issued to the requesting IP, and `duckduckgo_web` fetches a URL from
+one request and calls it in the next. With rotation those land on different
+IPs and fail. Most providers expose stickiness through the credentials
+(Evomi: `password_session-<6-10 alnum>_lifetime-<minutes>`); session IDs
+shorter than 6 characters are silently rejected and every request errors.
 
 ### Caveat on these results
 
