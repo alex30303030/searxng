@@ -285,9 +285,11 @@ different exit IP to every request, which breaks any engine that needs two
 requests from the same address — DuckDuckGo's `vqd` and Startpage's `sc` token
 are both issued to the requesting IP, and `duckduckgo_web` fetches a URL from
 one request and calls it in the next. With rotation those land on different
-IPs and fail. Most providers expose stickiness through the credentials
-(Evomi: `password_session-<6-10 alnum>_lifetime-<minutes>`); session IDs
-shorter than 6 characters are silently rejected and every request errors.
+IPs and fail. Most providers expose stickiness through the credentials, often
+as `password_session-<id>_lifetime-<minutes>`. Watch the provider's constraints
+on the session id — one tested provider requires 6 to 10 alphanumeric
+characters and silently rejects anything shorter, which surfaces as every
+request failing to connect rather than as an authentication error.
 
 ### Caveat on these results
 
@@ -351,7 +353,7 @@ is checked out in a sibling directory next to the compose file.
       dockerfile: Dockerfile
       args:
         VERSION: "2026.7.29-curlcffi"
-        VCS_URL: "https://github.com/alex30303030/searxng"
+        VCS_URL: "https://github.com/<your-account>/searxng"
     image: searxng-curlcffi:latest
     restart: unless-stopped
     ports:
