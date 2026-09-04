@@ -169,6 +169,7 @@ Terms / phrases that you keep coming across:
 import json
 import re
 import typing as t
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import babel
 import lxml.html
@@ -400,8 +401,7 @@ def request(query: str, params: "OnlineParams") -> None:
 
     data = params["data"]
     data["q"] = query
-    params["url"] = ddg_url
-    params["method"] = "POST"
+    # url and method are set at the end of this function, once `data` is complete
 
     if params["pageno"] == 1:
         data["b"] = ""
@@ -448,12 +448,41 @@ def request(query: str, params: "OnlineParams") -> None:
         data["df"] = t_range
         params["cookies"]["df"] = t_range
 
-    params["headers"]["Content-Type"] = "application/x-www-form-urlencoded"
-    params["headers"]["Referer"] = ddg_url
+    # Referer must not point at the result URL itself. With the GET below, a
+    # Referer of https://html.duckduckgo.com/html/ is on its own enough to get
+    # HTTP 202 and a CAPTCHA, while the same request refered from the DDG home
+    # page (or with no Referer at all) returns results. Measured 3/3 each way,
+    # on separate freshly allocated residential addresses.
+    params["headers"]["Referer"] = "https://duckduckgo.com/"
+
+    # DuckDuckGo answers a POST search with HTTP 202 and a CAPTCHA challenge
+    # page. This is independent of source IP and of the TLS fingerprint: it was
+    # reproduced from several freshly allocated residential addresses, with and
+    # without impersonation. The identical query sent as a GET returns results
+    # from the same addresses, so the form fields are moved into the query
+    # string. ``params["data"]`` is left populated because response() reports the
+    # region from it; the processor only forwards it for POST requests.
+    params["method"] = "GET"
+    params["url"] = f"{ddg_url}?{urlencode(data)}"
 
     logger.debug("param headers: %s", params["headers"])
     logger.debug("param data: %s", params["data"])
     logger.debug("param cookies: %s", params["cookies"])
+
+
+def unwrap_ddg_url(url: str) -> str:
+    """Unwrap DDG's click-tracking redirect.
+
+    Results are returned as ``//duckduckgo.com/l/?uddg=<target>&rut=...``.
+    Following it would route every click through DDG, so the target is
+    extracted. Anything that is not such a redirect is returned unchanged.
+    """
+    parsed = urlparse(url)
+    if parsed.path == "/l/" and parsed.netloc.endswith("duckduckgo.com"):
+        target = parse_qs(parsed.query).get("uddg")
+        if target:
+            return target[0]
+    return url
 
 
 def is_ddg_captcha(dom: ElementType):
@@ -497,7 +526,7 @@ def response(resp: "SXNG_Response") -> EngineResults:
         res.add(
             res.types.MainResult(
                 title=extract_text(_title) or "",
-                url=eval_xpath(div_result, ".//h2/a/@href")[0],
+                url=unwrap_ddg_url(eval_xpath(div_result, ".//h2/a/@href")[0]),
                 content=extract_text(_content) or "",
             )
         )
