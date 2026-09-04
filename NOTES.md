@@ -128,15 +128,58 @@ Raw JA3 (unnormalised) differs on every connection. That is expected and is not
 a bug: Chrome uses GREASE and shuffles extension order, so real Chrome does the
 same. Compare JA3N/JA4, never raw JA3.
 
-### Not yet verified
+### Unit tests
 
-* **The unit test suite has not been run** against this branch.
-  `python -m nose2 -s tests/unit -t . network.test_network` still needs doing.
-* **No engine-level verification.** Whether DuckDuckGo/Startpage/Brave/Presearch
-  actually stop CAPTCHA-ing, and whether Yahoo stops timing out, has not been
-  tested against a live instance — nor has a regression check on Google/Bing/
-  Wikipedia. TLS fingerprint is the most likely cause of those blocks, but it is
-  a hypothesis until searches are run from the deployed container.
+Full suite on this branch: **339 tests, OK** (`python -m nose2 -s tests/unit -t .`).
+
+### Engine results — impersonation fixes one engine, not four
+
+Two containers built from this branch, identical except `outgoing.impersonate`,
+queried through the JSON API. This is the honest outcome, and it is narrower
+than the premise the fork was built on:
+
+| engine | stock httpx | `impersonate: chrome` | verdict |
+| --- | --- | --- | --- |
+| brave | 0 — *too many requests* | **20 results** | **fixed** |
+| duckduckgo | 0 — *CAPTCHA* | 0 — *CAPTCHA* | not fixed |
+| startpage | 0 — *CAPTCHA* | 0 — *JSONDecodeError* | block cleared, parser fails |
+| yahoo | 0 — *HTTP protocol error* | 0 — no error | transport fixed, 0 results |
+| google | 10 results | 10 results | no regression |
+| bing | 10 results | 10 results | no regression |
+| wikipedia | 1 infobox | 1 infobox | no regression |
+
+Reading this correctly matters:
+
+* **Brave is a clean win.** It was returning *too many requests* and now returns
+  a full page of results.
+* **DuckDuckGo is unaffected.** Still CAPTCHA on every profile tried (chrome,
+  chrome136, firefox147, safari184). Whatever DDG is keying on, it is not the
+  TLS fingerprint alone.
+* **Startpage and Yahoo moved, but did not start working.** Impersonation
+  cleared the *network-level* block and revealed a *second, unrelated* failure
+  underneath — an engine/parser mismatch:
+  * Startpage: `JSONDecodeError: Extra data` at `searx/engines/startpage.py:409`
+    — the page is fetched fine, but the embedded JSON no longer parses.
+  * Yahoo: no error at all, simply zero results across every query tried.
+
+  Both are upstream engine-parser bugs against the sites' current markup. They
+  need a separate fix and are not addressable from the transport layer.
+* **Wikipedia returns an infobox, not `results`.** Measuring `len(results)` for
+  it reports 0 on a working engine — do not mistake that for a regression.
+* **Presearch is gone.** Upstream deleted the engine in `81b0ed7b3` (2026-07-29)
+  "because it got shutdown". It is absent from this fork, and no transport
+  change can bring it back.
+
+So of the five engines this fork set out to fix: **1 fixed (brave), 1 untouched
+(duckduckgo), 2 partially advanced but still broken for other reasons (startpage,
+yahoo), 1 impossible (presearch, service dead).** Nothing regressed.
+
+### Caveat on these results
+
+They were measured from a single IP that is neither the residential nor the
+proxied address the original diagnosis used. Anti-bot behaviour is per-IP and
+time-varying, so DuckDuckGo in particular may behave differently from the
+deployment host. Re-run the matrix there before drawing final conclusions.
 
 ## Rebasing onto upstream
 
