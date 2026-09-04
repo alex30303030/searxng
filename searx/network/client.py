@@ -238,9 +238,7 @@ def new_client(
                 verify, enable_http2, local_address, proxy_url, limit, retries, impersonate
             )
         else:
-            mounts[pattern] = get_transport(
-                verify, enable_http2, local_address, proxy_url, limit, retries, impersonate
-            )
+            mounts[pattern] = get_transport(verify, enable_http2, local_address, proxy_url, limit, retries, impersonate)
 
     if not enable_http:
         mounts['http://'] = AsyncHTTPTransportNoHttp()
