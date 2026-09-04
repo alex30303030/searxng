@@ -140,10 +140,10 @@ than the premise the fork was built on:
 
 | engine | stock httpx | `impersonate: chrome` | verdict |
 | --- | --- | --- | --- |
-| brave | 0 — *too many requests* | **20 results** | **fixed** |
-| duckduckgo | 0 — *CAPTCHA* | 0 — *CAPTCHA* | not fixed |
-| startpage | 0 — *CAPTCHA* | 0 — *JSONDecodeError* | block cleared, parser fails |
-| yahoo | 0 — *HTTP protocol error* | 0 — no error | transport fixed, 0 results |
+| brave | 0 — *too many requests* | **20 results** | **fixed by impersonation** |
+| yahoo | 0 — *HTTP protocol error* | **7 results** | **fixed by the engine patch below** |
+| duckduckgo | 0 — *CAPTCHA* | 0 — *CAPTCHA* | not fixed, see below |
+| startpage | 0 — *CAPTCHA* | 0 — *JSONDecodeError* | blocked by Anubis PoW, see below |
 | google | 10 results | 10 results | no regression |
 | bing | 10 results | 10 results | no regression |
 | wikipedia | 1 infobox | 1 infobox | no regression |
@@ -155,15 +155,11 @@ Reading this correctly matters:
 * **DuckDuckGo is unaffected.** Still CAPTCHA on every profile tried (chrome,
   chrome136, firefox147, safari184). Whatever DDG is keying on, it is not the
   TLS fingerprint alone.
-* **Startpage and Yahoo moved, but did not start working.** Impersonation
-  cleared the *network-level* block and revealed a *second, unrelated* failure
-  underneath — an engine/parser mismatch:
-  * Startpage: `JSONDecodeError: Extra data` at `searx/engines/startpage.py:409`
-    — the page is fetched fine, but the embedded JSON no longer parses.
-  * Yahoo: no error at all, simply zero results across every query tried.
-
-  Both are upstream engine-parser bugs against the sites' current markup. They
-  need a separate fix and are not addressable from the transport layer.
+* **Yahoo is fixed**, by a separate engine patch rather than by the transport —
+  see "Yahoo" below. Impersonation only cleared the network-level failure and
+  exposed the real bugs underneath.
+* **Startpage is blocked by Anubis**, a proof-of-work gate — see below. Not a
+  parser bug and not fixable from the transport layer.
 * **Wikipedia returns an infobox, not `results`.** Measuring `len(results)` for
   it reports 0 on a working engine — do not mistake that for a regression.
 * **Presearch is gone.** Upstream deleted the engine in `81b0ed7b3` (2026-07-29)
@@ -173,6 +169,79 @@ Reading this correctly matters:
 So of the five engines this fork set out to fix: **1 fixed (brave), 1 untouched
 (duckduckgo), 2 partially advanced but still broken for other reasons (startpage,
 yahoo), 1 impossible (presearch, service dead).** Nothing regressed.
+
+### Yahoo — fixed, two upstream bugs
+
+Nothing to do with TLS. Both bugs only bite outside the regions listed in
+`region2domain`, which is why they are still present upstream.
+
+1. `search.yahoo.com` answers **302** to a country domain (`au.search.yahoo.com`
+   from here) with an 88 byte body. `searx/search/processors/online.py` defaults
+   to `allow_redirects=False`, so the engine parsed the empty stub — zero
+   results and, because it was a valid 200-shaped object, *no error*.
+2. `response()` chose its xpath from `resp.search_params["domain"]` — the
+   domain that was *requested*, not the one that answered. The two serve
+   different markup. Measured against a real body:
+
+   | xpath | matches |
+   | --- | --- |
+   | `.//div[@class~=compTitle]/a/@href` (search.yahoo.com) | 0/7 |
+   | `.//div[@class~=compTitle]/h3/a/@href` (country domain) | 7/7 |
+
+Fix: follow the redirect, set `soft_max_redirects` so the expected redirect is
+not counted as an error, and derive the domain from `resp.url.host`.
+
+### Startpage — blocked by Anubis, not fixable here
+
+Startpage now serves **Anubis v1.26.4**, a JavaScript proof-of-work anti-bot
+gate. The impersonated request gets a clean `200` with no CAPTCHA — and a
+challenge page instead of results:
+
+```json
+{"rules":{"algorithm":"fast","difficulty":4},
+ "challenge":{"issuedAt":"...","metadata":{"User-Agent":"...Chrome/150..."}}}
+```
+
+The challenge echoes back our impersonated User-Agent, confirming the TLS work
+succeeded and the gate is at a higher layer. The `JSONDecodeError` at
+`searx/engines/startpage.py:409` is just the parser choking on that page.
+
+Passing it requires computing the proof-of-work — deliberately defeating an
+anti-bot control the operator chose to deploy, not a parser fix. That is a
+policy decision, not an engineering one, and is left unimplemented here.
+
+### DuckDuckGo — still blocked; the likely reason
+
+Impersonation does not help DDG, on any profile tried (`chrome`, `chrome136`,
+`firefox147`, `safari184`).
+
+The likely cause is that **this patch fixes the TLS and HTTP/2 fingerprint but
+not the HTTP headers**. `default_headers=True` only lets curl_cffi fill in
+headers httpx has not already set, and httpx always sets its own:
+
+| header | httpx sends | a real Chrome sends |
+| --- | --- | --- |
+| `accept` | `*/*` | `text/html,application/xhtml+xml,...` |
+| `accept-encoding` | `gzip, deflate` | `gzip, deflate, br, zstd` |
+| `connection` | `keep-alive` | *not sent — illegal in HTTP/2* |
+
+So the handshake claims Chrome while the headers remain httpx-shaped, and
+`connection: keep-alive` on an HTTP/2 request is a protocol violation no
+browser commits. That is consistent with Brave (which appears to gate on TLS)
+being fixed while DDG (which is header-aware) is not.
+
+This was **not** fixed here, for two reasons. Two of the DDG sub-engines set
+`Accept: */*` deliberately for XHR-style endpoints, so a blanket header rewrite
+risks breaking them; and the IP used for testing had been rate-limited by the
+testing itself, making any change unverifiable. Retry from an IP with a clean
+reputation before attempting it.
+
+A related experiment **was tried and reverted**: dropping SearXNG's User-Agent
+so curl_cffi's profile-matched one is used. It appeared to fix DDG, but that
+rested on a single sample — re-running later showed *every* combination,
+including the supposedly broken one, returning results. Meanwhile it regressed
+Google from 10 results to 0. Do not re-attempt it without repeated-sample
+measurements.
 
 ### Caveat on these results
 
