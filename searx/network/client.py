@@ -13,6 +13,8 @@ import threading
 import httpx
 from httpx_socks import AsyncProxyTransport
 from python_socks import parse_proxy_url, ProxyConnectionError, ProxyTimeoutError, ProxyError
+from curl_cffi.const import CurlOpt
+from httpx_curl_cffi import AsyncCurlTransport
 
 from searx import logger
 
@@ -111,9 +113,49 @@ class AsyncProxyTransportFixed(AsyncProxyTransport):
             raise httpx.ProxyError("ProxyError: " + str(e.args[0]), request=request) from e
 
 
+def get_impersonate_transport(verify: bool, local_address: str, proxy_url: str | None, impersonate: str):
+    """Transport reproducing a real browser's TLS (JA3/JA4) and HTTP/2 fingerprint.
+
+    Unlike :py:obj:`get_transport` no :py:obj:`SSLContext` is built here: the
+    cipher suites, extension ordering and ALPN are dictated by the
+    ``impersonate`` profile, so applying :py:obj:`shuffle_ciphers` would only
+    corrupt the very fingerprint we are trying to reproduce.
+
+    ``FRESH_CONNECT`` is required to issue concurrent requests through a single
+    transport, which is exactly how SearXNG queries engines (one request per
+    engine, all in flight at once).  Without it, parallel requests interfere
+    with each other -- see https://github.com/vgavro/httpx-curl-cffi
+
+    ``verify`` is forwarded as the raw bool/path from the settings rather than
+    an :py:obj:`SSLContext`, which curl_cffi does not accept.
+    """
+    curl_options: dict[t.Any, t.Any] = {CurlOpt.FRESH_CONNECT: True}
+    if local_address:
+        # equivalent of httpx' local_address, used by outgoing.source_ips
+        curl_options[CurlOpt.INTERFACE] = local_address
+    return AsyncCurlTransport(
+        impersonate=impersonate,
+        default_headers=True,
+        verify=verify,
+        proxy=proxy_url,
+        curl_options=curl_options,
+    )
+
+
 def get_transport_for_socks_proxy(
-    verify: bool, http2: bool, local_address: str, proxy_url: str, limit: httpx.Limits, retries: int
+    verify: bool,
+    http2: bool,
+    local_address: str,
+    proxy_url: str,
+    limit: httpx.Limits,
+    retries: int,
+    impersonate: str | None = None,
 ):
+    if impersonate:
+        # curl_cffi speaks SOCKS natively; going through httpx_socks here would
+        # terminate the TLS handshake in Python and lose the impersonation.
+        return get_impersonate_transport(verify, local_address, proxy_url, impersonate)
+
     # support socks5h (requests compatibility):
     # https://requests.readthedocs.io/en/master/user/advanced/#socks
     # socks5://   hostname is resolved on client side
@@ -142,8 +184,17 @@ def get_transport_for_socks_proxy(
 
 
 def get_transport(
-    verify: bool, http2: bool, local_address: str, proxy_url: str | None, limit: httpx.Limits, retries: int
+    verify: bool,
+    http2: bool,
+    local_address: str,
+    proxy_url: str | None,
+    limit: httpx.Limits,
+    retries: int,
+    impersonate: str | None = None,
 ):
+    if impersonate:
+        return get_impersonate_transport(verify, local_address, proxy_url, impersonate)
+
     _verify = get_sslcontexts(None, None, verify, True) if verify is True else verify
     return httpx.AsyncHTTPTransport(
         # pylint: disable=protected-access
@@ -169,6 +220,7 @@ def new_client(
     retries: int,
     max_redirects: int,
     hook_log_response: t.Callable[..., t.Any] | None,
+    impersonate: str | None = None,
 ) -> httpx.AsyncClient:
     limit = httpx.Limits(
         max_connections=max_connections,
@@ -183,15 +235,17 @@ def new_client(
             continue
         if proxy_url.startswith('socks4://') or proxy_url.startswith('socks5://') or proxy_url.startswith('socks5h://'):
             mounts[pattern] = get_transport_for_socks_proxy(
-                verify, enable_http2, local_address, proxy_url, limit, retries
+                verify, enable_http2, local_address, proxy_url, limit, retries, impersonate
             )
         else:
-            mounts[pattern] = get_transport(verify, enable_http2, local_address, proxy_url, limit, retries)
+            mounts[pattern] = get_transport(
+                verify, enable_http2, local_address, proxy_url, limit, retries, impersonate
+            )
 
     if not enable_http:
         mounts['http://'] = AsyncHTTPTransportNoHttp()
 
-    transport = get_transport(verify, enable_http2, local_address, None, limit, retries)
+    transport = get_transport(verify, enable_http2, local_address, None, limit, retries, impersonate)
 
     event_hooks = None
     if hook_log_response:
