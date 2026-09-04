@@ -216,6 +216,23 @@ outgoing:
   #    - 1.1.1.1
   #    - 1.1.1.2
   #    - fe80::/126
+  #
+  # uncomment below to impersonate a real browser's TLS handshake.  Some
+  # engines sit behind bot management that fingerprints the TLS ClientHello
+  # (JA3/JA4) and the HTTP/2 SETTINGS frame, and rejects the signature of
+  # Python HTTP clients regardless of the User-Agent or the source IP.
+  #
+  # Accepts any profile supported by curl_cffi, e.g. chrome, chrome131,
+  # firefox, safari, edge.  Unset (the default) keeps the stock httpx
+  # transport.  Proxies, including SOCKS, keep working either way.
+  #
+  # This can also be set per engine or per network, e.g.
+  #   engines:
+  #     - name: duckduckgo
+  #       network:
+  #         impersonate: chrome
+  #
+  #  impersonate: chrome
 
 
 # Plugin configuration, for more details see

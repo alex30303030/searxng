@@ -261,6 +261,8 @@ SCHEMA: dict[str, t.Any] = {
         'retries': SettingsValue(int, 0),
         'proxies': SettingsValue((None, str, dict), None),
         'source_ips': SettingsValue((None, str, list), None),
+        # browser TLS fingerprint to impersonate, e.g. 'chrome'; None disables it
+        'impersonate': SettingsValue((None, str), None),
         # Tor configuration
         'using_tor_proxy': SettingsValue(bool, False),
         'extra_proxy_timeout': SettingsValue(int, 0),

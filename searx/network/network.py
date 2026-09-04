@@ -57,6 +57,7 @@ class Network:
         'max_redirects',
         'retries',
         'retry_on_http_error',
+        'impersonate',
         '_local_addresses_cycle',
         '_proxies_cycle',
         '_clients',
@@ -80,6 +81,7 @@ class Network:
         retries: int = 0,
         retry_on_http_error: bool = False,
         max_redirects: int = 30,
+        impersonate: str | None = None,
         logger_name: str = None,  # pyright: ignore[reportArgumentType]
     ):
 
@@ -95,6 +97,7 @@ class Network:
         self.retries = retries
         self.retry_on_http_error = retry_on_http_error
         self.max_redirects = max_redirects
+        self.impersonate = impersonate
         self._local_addresses_cycle = self.get_ipaddress_cycle()
         self._proxies_cycle = self.get_proxy_cycles()
         self._clients = {}
@@ -207,6 +210,7 @@ class Network:
                 0,
                 max_redirects,
                 hook_log_response,
+                self.impersonate,
             )
             if self.using_tor_proxy and not await self.check_tor_proxy(client, proxies):
                 await client.aclose()
@@ -361,6 +365,7 @@ def initialize(
         'max_redirects': settings_outgoing['max_redirects'],
         'retries': settings_outgoing['retries'],
         'retry_on_http_error': False,
+        'impersonate': settings_outgoing['impersonate'],
     }
 
     def new_network(params: dict[str, t.Any], logger_name: str | None = None):
